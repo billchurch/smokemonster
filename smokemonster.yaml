@@ -154,13 +154,12 @@ switch:
       - wait_until:
           binary_sensor.is_on: chucker_primed
       - switch.turn_on: mother_chucker
-
     turn_off_action:
       then:
       - switch.turn_off: smoke_generator_heat            
       - switch.turn_off: mother_chucker
 
-  # While the smoke_generator is on, this will dispense a neww
+  # While the smoke_generator is on, this will dispense a new
   # puck every ${puck_interval}
   - platform: template
     name: Mother Chucker
