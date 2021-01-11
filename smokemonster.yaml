@@ -1,0 +1,441 @@
+substitutions:
+  device_name: smokemonster
+  device_description: Smoke Monster
+  friendly_name: smokemonster
+  puck_interval: 20min
+  puck_motor_delay: 12s
+  prime_delay: 14s
+  ir_dwell: 5.5sec
+
+binary_sensor:
+# puck chucker position IR sensor, update template sensor
+# This sensor will turn off the puck_chucker_advance motor 
+# after ${ir_dwell} time. The intention is to park it 180 
+# degrees from a full extension. We also want to reset any
+# binary sensors to a known state and increment the "num_chucks"
+# sensor to keep track of how many cycles we've gone through.
+# IR beam break sensor array:
+# 1      2           3                    4
+# black  red         orange               black
+# gnd    ir_beam     ir_recv              gnd
+#        1kOhmR->5v  GPIO_27+370OhmR->5v
+
+- platform: gpio
+  pin: GPIO27
+  id: puck_ir
+  internal: true
+  on_press:
+    then:
+    - delay: ${ir_dwell}
+    - switch.turn_off: puck_chucker_advance
+    - sensor.template.publish:
+        id: num_chucks
+        state: !lambda 'return (id(num_chucks).state + 1);'
+    - if:
+        condition: 
+          switch.is_on: chucker_reset
+        then:
+          switch.turn_off: chucker_reset
+    - if:
+        condition:
+          sensor.in_range:
+            id: num_chucks
+            above: 3
+        then:
+          - binary_sensor.template.publish: 
+              id: chucker_primed
+              state: ON
+
+# This sensor tells us that 3 pucks are present in the smoke
+# generator path. 3 are required to begin the smoke operation/.
+- platform: template
+  id: chucker_primed
+  name: Chucker Primed
+
+# Reports if this device is Connected or not
+- platform: status
+  name: ${friendly_name} Status
+
+output:
+# blue - heater - 40A SSR
+# This is the main heater element for the smoker box. This
+# is controlled by the climate pid controller. In my version
+# I have 2 x 500w elements, one of the two can be switched
+# off manually... I may decide to make this controllable by
+# smokemonster eventually.
+# We are using "slow_pwm" here as the climate pid component
+# requires a PWM output. 
+  - platform: slow_pwm
+    pin: GPIO13 
+    id: heater
+    period: 3s
+
+switch:
+# rotates the Puck Chucker until the IR sensor triggers
+# useful to get back in sync...  
+  - platform: template
+    id: chucker_reset
+    name: Puck Chucker Reset
+    optimistic: on
+    turn_on_action:
+      - switch.turn_on: puck_chucker_advance
+
+# activates "puck_chucker_advance" until the binary_sensor
+# "chucker_primed" is on (3 pucks in the smoke generator)
+  - platform: template
+    id: chucker_prime
+    name: Puck Chucker Prime
+    optimistic: on
+    turn_on_action:
+      then:
+        - while:
+            condition: 
+              binary_sensor.is_off: chucker_primed
+            then: 
+              - switch.turn_on: puck_chucker_advance
+              - delay: ${prime_delay}
+        - wait_until:
+              binary_sensor.is_on: chucker_primed            
+
+# enables the PID autotune feature
+  - platform: template
+    name: "PID Climate Autotune"
+    turn_on_action:
+      - climate.pid.autotune: pid_climate
+
+# green - puck chucker - 25A SSR
+# JUN TUO TY-50B E212993
+# 110-120v 4W electric motor 
+# 5/6 r/min CW/CCW 
+  - platform: gpio
+    pin: GPIO14
+    id: puck_chucker_advance
+    restore_mode: ALWAYS_OFF
+    internal: true
+    on_turn_on:
+      then:
+        # when we turn on, we wait ${puck_motor_delay} and
+        # check to see if we've already been turned off
+        # if we haven't, it means the IR sensor has failed, 
+        # we need to stop and raise an error.
+        # If we were successfully turned off by the IR sensor,
+        # then we need to check if we had a previous failure,
+        # and clear it.
+        - delay: ${puck_motor_delay}
+        - if:
+            condition: 
+              switch.is_on: puck_chucker_advance
+            then:
+              - switch.turn_off: puck_chucker_advance
+              - text_sensor.template.publish:
+                  id: puck_chucker_errors
+                  state: "NO_IR"
+            else: 
+                - if: 
+                    condition:
+                     text_sensor.state:
+                        id: puck_chucker_errors
+                        state: "NO_IR"
+                    then: 
+                      - text_sensor.template.publish:
+                          id: puck_chucker_errors
+                          state: "OK"
+  # The smoke generator "program"
+  # Turn on the heater, make sure we have 3 pucks loaded
+  # Mother_Chucker is responsible for dispensing a new puck
+  # every ${puck_interval}.
+  - platform: template
+    name: "Smoke Generator"
+    id: smoke_generator
+    optimistic: on
+    turn_on_action:
+      - switch.turn_on: smoke_generator_heat
+      - switch.turn_on: chucker_prime
+      - wait_until:
+          binary_sensor.is_on: chucker_primed
+      - switch.turn_on: mother_chucker
+
+    turn_off_action:
+      then:
+      - switch.turn_off: smoke_generator_heat            
+      - switch.turn_off: mother_chucker
+
+  # While the smoke_generator is on, this will dispense a neww
+  # puck every ${puck_interval}
+  - platform: template
+    name: Mother Chucker
+    id: mother_chucker
+    turn_on_action:
+      - while: 
+          condition: 
+            switch.is_on: smoke_generator
+          then:
+            - delay: ${puck_interval}
+            - switch.turn_on: puck_chucker_advance
+  
+  # yellow - smoke generator heater - 40A SSR
+  # 120v 125W heating element
+  # reaches roughly 500*F, this causes the puck to burn
+  # and produce smoke
+  - platform: gpio
+    pin: GPIO12
+    name: Smoke Generator Heater
+    id: smoke_generator_heat
+    restore_mode: ALWAYS_OFF
+
+  - platform: restart
+    name: "${device_description} Restart"
+
+### Switches for Setting and Getting PID Values in Home Assistant ###
+### This needs work TODO ###
+  - platform: template
+    name: "PID Set"
+    turn_on_action:
+      - climate.pid.set_control_parameters:
+          id: pid_climate
+          kp: !lambda
+              return id(p_coefficient).state;
+          ki: !lambda
+              return id(i_coefficient).state;
+          kd: !lambda
+              return id(d_coefficient).state;
+  - platform: template
+    name: "Get PID Values"
+    turn_on_action:
+      - homeassistant.service:
+          service: input_number.set_value
+          data:
+            entity_id: input_number.smoker1_p_coefficient
+            value: !lambda return id(kp).state;
+      - homeassistant.service:
+          service: input_number.set_value
+          data:
+            entity_id: input_number.smoker1_i_coefficient
+            value: !lambda return id(ki).state;
+      - homeassistant.service:
+          service: input_number.set_value
+          data:
+            entity_id: input_number.smoker1_d_coefficient
+            value: !lambda return id(kd).state;
+### Switch to reset integral term for PID calculation ###
+  - platform: template
+    name: "Reset Integral"
+    turn_on_action:
+      - climate.pid.reset_integral_term: pid_climate
+
+sensor:
+  # keep track of how many puck advance cycles we've had good for
+  # statistics and also used to know if the smoke generator is
+  # "primed"
+  - platform: template
+    id: num_chucks
+    name: Number of Chucks
+    update_interval: 10s
+    # "accuracy_decimals: 0" effectively makes it an integer
+    accuracy_decimals: 0
+    unit_of_measurement: Count
+
+  # we grab the outside temperature from HA to display on the...display
+  # may use this at some point to pro-actively adjust temperature...
+  - platform: homeassistant
+    id: outside_temperature
+    entity_id: sensor.home_temp
+    internal: true
+
+  # the main cooking chamber temperature. PT100 Platinum Sensor, good up
+  # too 550*C. About 4x more than what this chamber will ever see
+  - platform: max31865
+    name: "Chamber Temperature"
+    id: temp1
+    cs_pin: GPIO17
+    reference_resistance: 430
+    rtd_nominal_resistance: 100
+    rtd_wires: 3
+    filters:
+      - exponential_moving_average:
+         alpha: 0.09
+         send_every: 60
+    update_interval: 1s
+
+  # PID stuff
+  - platform: pid
+    name: "PID Result"
+    type: RESULT
+  - platform: pid
+    name: "PID Integral Term"
+    type: INTEGRAL
+  - platform: pid
+    name: "PID Derivative Term"
+    type: DERIVATIVE
+  - platform: pid
+    name: "PID Proportional"
+    type: PROPORTIONAL
+  - platform: pid
+    name: "PID P Coefficient"
+    id: kp
+    type: KP
+  - platform: pid
+    name: "PID I Coefficient"
+    id: ki
+    type: KI
+  - platform: pid
+    name: "PID D Coefficient"
+    id: kd
+    type: KD
+  - platform: pid
+    name: "PID Output"
+    type: HEAT
+
+### Sensors to read input numbers for PID tuning in Home Assistant ###
+  - platform: homeassistant
+    name: "P Coefficient"
+    entity_id: input_number.smoker1_p_coefficient
+    id: p_coefficient
+  - platform: homeassistant
+    name: "I Coefficient"
+    entity_id: input_number.smoker1_i_coefficient
+    id: i_coefficient
+  - platform: homeassistant
+    name: "D Coefficient"
+    entity_id: input_number.smoker1_d_coefficient
+    id: d_coefficient
+
+# Reports how long the device has been powered (in minutes)
+  - platform: uptime
+    name: ${friendly_name} Uptime
+    filters:
+      - lambda: return x / 60.0;
+    unit_of_measurement: minutes
+# Reports the WiFi signal strength
+  - platform: wifi_signal
+    name: ${friendly_name} Signal
+    update_interval: 60s
+
+# this controls the main element and chamber temperature
+climate:
+  - platform: pid
+    visual:
+      min_temperature: 150 °F
+      max_temperature: 525 °F
+      temperature_step: 1 °C  
+    id: pid_climate
+    name: "Electric Grill"
+    sensor: temp1
+    default_target_temperature: 0°C
+    heat_output: heater
+    control_parameters:
+      kp: 0.03861
+      ki: 0.00010
+      kd: 3.82207
+      min_integral: 0
+      max_integral: 0
+
+time:
+  - platform: homeassistant
+    id: my_time
+  
+text_sensor:
+# Reports the ESPHome Version with compile date
+- platform: version
+  name: ${friendly_name} ESPHome Version
+
+# log any time a puck advance takes longer than it should
+# we assume that the IR sensor did not detect the cycle and
+# we will want to know about this for troubleshooting the
+# hardware
+- platform: template
+  name: "Puck Chucker Errors"
+  id: puck_chucker_errors
+  lambda: |-
+    return {"OK"};
+
+esphome:
+  name: ${device_name}
+  comment: ${device_description}
+  platform: ESP32
+  board: mhetesp32devkit
+  on_boot: 
+    priority: -100
+    # set these to some known, sane values
+    # may want to do something with this later to gracefully
+    # recover if we rebooted or something during a cook
+    # right now, there's no state between reboots
+    then:
+      - binary_sensor.template.publish: 
+          id: chucker_primed
+          state: OFF
+      - switch.turn_on: chucker_reset
+      - sensor.template.publish:
+          id: num_chucks
+          state: '0'
+
+# web_server:
+#  port: 80
+
+wifi:
+  use_address: ${device_name}
+  domain: !secret domain
+  power_save_mode: none
+  ssid: !secret wifissid
+  password: !secret wifipass
+  reboot_timeout: 0s
+  # fast_connect: on #we only have one WiFi AP so just use the first one that matches
+  ap:
+    ssid: "${device_name} Fallback Hotspot"
+    password: !secret wifipass
+
+# Enable logging
+logger:
+  baud_rate: 0
+  level: DEBUG
+#  logs:
+#    i2c: NONE
+    
+ota:
+  password: !secret otapass
+
+api:
+  password: !secret ha_api
+  reboot_timeout: 0s
+
+i2c:
+  sda: GPIO21
+  scl: GPIO22
+  scan: True
+
+spi:
+  miso_pin: GPIO19
+  mosi_pin: GPIO23
+  clk_pin: GPIO18
+
+font:
+  - file: 'slkscr.ttf'
+    id: font1
+    size: 8
+
+  - file: 'BebasNeue-Regular.ttf'
+    id: font2
+    size: 48
+
+  - file: 'arial.ttf'
+    id: font3
+    size: 14
+
+display:
+  - platform: ssd1306_i2c
+    model: "SH1106 128x64"
+    address: 0x3C
+    lambda: |-
+      // Print "SmokeMonster" in top center.
+      it.printf(64, 0, id(font1), TextAlign::TOP_CENTER, "SmokeMonster");
+
+      // Print time in HH:MM format
+      it.strftime(0, 60, id(font2), TextAlign::BASELINE_LEFT, "%I:%M", id(my_time).now());
+
+      // Print inside temperature (from homeassistant sensor)
+      it.printf(127, 23, id(font3), TextAlign::TOP_RIGHT , "%.1f°", id(temp1).state* (9.0/5.0) + 32.0);
+
+      // Print outside temperature (from homeassistant sensor)
+      if (id(outside_temperature).has_state()) {
+        it.printf(127, 60, id(font3), TextAlign::BASELINE_RIGHT , "%.1f°", id(outside_temperature).state);
+      }
