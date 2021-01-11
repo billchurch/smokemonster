@@ -1,0 +1,2 @@
+# smokemonster
+ Digital Smoker Controller
