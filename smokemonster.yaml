@@ -161,10 +161,10 @@ switch:
     optimistic: on
     turn_on_action:
       - switch.turn_on: smoke_generator_heat
-      - switch.turn_on: chucker_prime
-      - wait_until:
-          binary_sensor.is_on: chucker_primed
-      - switch.turn_on: mother_chucker
+      #- switch.turn_on: chucker_prime
+      #- wait_until:
+      #    binary_sensor.is_on: chucker_primed
+      #- switch.turn_on: mother_chucker
     turn_off_action:
       then:
       - switch.turn_off: smoke_generator_heat            
@@ -394,7 +394,8 @@ esphome:
 #  port: 80
 
 wifi:
-  use_address: ${device_name}
+  # use_address: ${device_name}
+  use_address: 192.168.0.143
   domain: !secret domain
   power_save_mode: none
   ssid: !secret wifissid
